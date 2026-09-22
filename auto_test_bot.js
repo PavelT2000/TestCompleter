@@ -61,7 +61,7 @@ const ai = new GoogleGenAI({ apiKey: API_KEY });
         const pages = await browser.pages();
         for (const p of pages) {
             try {
-                const url = p.url();
+                const url = p.target().url();
                 if (url.includes("attempt.php") || url.includes("quiz")) {
                     const hasQuestion = await p.evaluate(() => !!document.querySelector('.que'));
                     if (hasQuestion) {
