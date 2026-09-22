@@ -30,15 +30,38 @@ const ai = new GoogleGenAI({ apiKey: API_KEY });
     await page.goto(START_URL);
     
     console.log("⏳ Ожидание ручной авторизации и перехода к тесту...");
-    console.log("Как только вы откроете первую страницу теста, скрипт продолжит работу.");
+    console.log("Как только вы откроете первую страницу теста (даже если она откроется в новом окне), скрипт продолжит работу.");
 
-    // Ждем, пока URL не будет похож на страницу попытки
-    await page.waitForFunction('window.location.href.includes("attempt.php") || window.location.href.includes("quiz")', { timeout: 0 });
+    let testPage = null;
+    while (!testPage) {
+        const pages = await browser.pages();
+        for (const p of pages) {
+            try {
+                const url = p.url();
+                if (url.includes("attempt.php") || url.includes("quiz")) {
+                    // Убеждаемся, что на странице реально есть вопросы
+                    const hasQuestion = await p.evaluate(() => !!document.querySelector('.qtext'));
+                    if (hasQuestion) {
+                        testPage = p;
+                        break;
+                    }
+                }
+            } catch (e) {
+                // Игнорируем ошибки доступа к закрытым вкладкам
+            }
+        }
+        if (!testPage) {
+            await new Promise(r => setTimeout(r, 2000)); // Ждем 2 секунды перед следующей проверкой
+        }
+    }
+
+    // Если тест открылся во всплывающем окне, фокус страницы мог потеряться
+    await testPage.bringToFront();
     console.log("✅ Тест обнаружен! Начинаю автоматическое прохождение.");
 
     let hasNext = true;
     while (hasNext) {
-        const qData = await page.evaluate(() => {
+        const qData = await testPage.evaluate(() => {
             const qtextElement = document.querySelector('.qtext');
             if (!qtextElement) return null;
             
@@ -82,7 +105,7 @@ const ai = new GoogleGenAI({ apiKey: API_KEY });
             const idsToClick = selectedIndexes.map(idx => qData.options[idx]?.id).filter(Boolean);
             
             if (idsToClick.length > 0) {
-                await page.evaluate((ids) => {
+                await testPage.evaluate((ids) => {
                     ids.forEach(id => {
                         const el = document.getElementById(id);
                         if (el && !el.checked) el.click();
@@ -96,11 +119,11 @@ const ai = new GoogleGenAI({ apiKey: API_KEY });
             console.error("❌ Ошибка при запросе к Gemini:", e.message);
         }
 
-        const nextBtn = await page.$('input[name="next"]');
+        const nextBtn = await testPage.$('input[name="next"]');
         if (nextBtn) {
             console.log("➡️ Переход на следующую страницу...");
             await Promise.all([
-                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
+                testPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
                 nextBtn.click()
             ]);
             await new Promise(r => setTimeout(r, 1000));
