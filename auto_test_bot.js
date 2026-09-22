@@ -17,17 +17,41 @@ if (!API_KEY) {
 const ai = new GoogleGenAI({ apiKey: API_KEY });
 
 (async () => {
-    console.log("🚀 Запуск браузера...");
-    const browser = await puppeteer.launch({
-        executablePath: CHROME_PATH,
-        headless: false,
-        defaultViewport: null,
-        userDataDir: PROFILE_PATH,
-        args: ['--start-maximized']
-    });
+    let browser;
+    try {
+        const fs = require('fs');
+        const path = require('path');
+        const activePortFile = path.join(PROFILE_PATH, 'DevToolsActivePort');
+        let port = '9222';
+        if (fs.existsSync(activePortFile)) {
+            const lines = fs.readFileSync(activePortFile, 'utf8').split('\n');
+            port = lines[0].trim();
+        }
+        
+        console.log(`Пытаюсь подключиться к уже открытому браузеру на порту ${port}...`);
+        browser = await puppeteer.connect({
+            browserURL: `http://127.0.0.1:${port}`,
+            defaultViewport: null
+        });
+        console.log("✅ Успешно подключено к открытому браузеру!");
+    } catch (e) {
+        console.log("🚀 Открытого браузера с отладкой не найдено. Запуск нового окна Chrome...");
+        browser = await puppeteer.launch({
+            executablePath: CHROME_PATH,
+            headless: false,
+            defaultViewport: null,
+            userDataDir: PROFILE_PATH,
+            args: ['--start-maximized']
+        });
+    }
 
-    const page = await browser.newPage();
-    await page.goto(START_URL);
+    const pages = await browser.pages();
+    let page = pages.length > 0 ? pages[0] : await browser.newPage();
+    
+    // Переходим только если мы в пустой вкладке
+    if (!page.url().includes('attempt') && !page.url().includes('quiz')) {
+        await page.goto(START_URL);
+    }
     
     console.log("⏳ Ожидание ручной авторизации и перехода к тесту...");
     console.log("Как только вы откроете первую страницу теста (даже если она откроется в новом окне), скрипт продолжит работу.");
