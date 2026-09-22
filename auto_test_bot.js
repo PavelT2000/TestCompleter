@@ -9,6 +9,21 @@ const PROFILE_PATH = process.env.PROFILE_PATH || "C:\\Users\\user\\chrome-dev-pr
 const START_URL = process.env.START_URL || "https://lms.bsuir.by/login/index.php";
 // ================================================
 
+// Логирование в файл для удобного дебага
+const fs = require('fs');
+const util = require('util');
+const logFile = fs.createWriteStream('bot_debug.log', { flags: 'w' });
+const originalLog = console.log;
+const originalError = console.error;
+console.log = function () {
+    logFile.write(util.format.apply(null, arguments) + '\n');
+    originalLog.apply(console, arguments);
+};
+console.error = function () {
+    logFile.write(util.format.apply(null, arguments) + '\n');
+    originalError.apply(console, arguments);
+};
+
 if (!API_KEY) {
     console.error("❌ Ошибка: Не задан GEMINI_API_KEY в файле .env");
     process.exit(1);
