@@ -193,13 +193,42 @@ ${promptData}
 }
 Никакого лишнего текста, только валидный JSON.`;
 
+        let rawAns = null;
+        const fallbackModels = [
+            'gemini-2.5-flash',
+            'gemini-1.5-flash',
+            'gemini-2.5-pro',
+            'gemini-1.5-pro',
+            'gemini-1.5-flash-8b'
+        ];
+
+        for (const model of fallbackModels) {
+            try {
+                console.log(`🧠 Отправляю запрос к Gemini API (модель: ${model})...`);
+                const response = await ai.models.generateContent({
+                    model: model,
+                    contents: prompt,
+                });
+                rawAns = response.text.trim();
+                console.log(`✅ Модель ${model} успешно ответила.`);
+                break; // Выходим из цикла при успехе
+            } catch (e) {
+                let errMsg = e.message;
+                if (errMsg.includes("Quota exceeded") || errMsg.includes("429")) {
+                    console.log(`⚠️ Лимит запросов у ${model} исчерпан. Пробуем резервную...`);
+                } else {
+                    console.log(`⚠️ Ошибка у ${model}: ${errMsg.substring(0, 100)}... Пробуем резервную...`);
+                }
+                await new Promise(r => setTimeout(r, 2000)); // Пауза перед сменой модели
+            }
+        }
+
+        if (!rawAns) {
+            console.error("❌ Ни одна модель не смогла обработать запрос (везде кончились лимиты или ошибки).");
+            continue; // Пропускаем эту пачку вопросов
+        }
+
         try {
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: prompt,
-            });
-            
-            let rawAns = response.text.trim();
             if (rawAns.startsWith('```json')) rawAns = rawAns.replace(/```json/g, '').replace(/```/g, '').trim();
             if (rawAns.startsWith('```')) rawAns = rawAns.replace(/```/g, '').trim();
 
@@ -215,9 +244,10 @@ ${promptData}
                     });
                 }
             });
-            console.log(`✅ Пачка успешно обработана.`);
+            console.log(`✅ Пачка успешно распарсена и подготовлена к кликам.`);
         } catch (e) {
-            console.error("❌ Ошибка при запросе/парсинге Gemini:", e.message);
+            console.error("❌ Ошибка при парсинге JSON-ответа Gemini:", e.message);
+            console.log("Сам ответ был таким:", rawAns);
         }
     }
 
