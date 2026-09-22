@@ -96,6 +96,22 @@ const ai = new GoogleGenAI({ apiKey: API_KEY });
 
     // ================= ФАЗА 1: СБОР ВСЕХ ВОПРОСОВ =================
     console.log("🔍 ФАЗА 1: Собираю все вопросы со всех страниц теста...");
+    
+    // Принудительно идем на первую страницу (чтобы не пропустить вопросы, если тест открылся с середины)
+    let startUrl = testPage.target().url();
+    if (startUrl.includes("attempt.php")) {
+        let firstPageUrl;
+        if (startUrl.includes("page=")) {
+            firstPageUrl = startUrl.replace(/page=\d+/, 'page=0');
+        } else {
+            firstPageUrl = startUrl + "&page=0";
+        }
+        if (startUrl !== firstPageUrl && !startUrl.includes("page=0")) {
+            console.log("⏪ Обнаружено, что мы не в начале. Возвращаюсь на первую страницу...");
+            await testPage.goto(firstPageUrl, { waitUntil: 'domcontentloaded' });
+        }
+    }
+
     const allQuestions = [];
     
     let scraping = true;
