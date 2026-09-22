@@ -94,14 +94,22 @@ const ai = new GoogleGenAI({ apiKey: API_KEY });
     await testPage.bringToFront();
     console.log("✅ Тест обнаружен! Начинаю автоматическое прохождение.");
 
-    let hasNext = true;
-    while (hasNext) {
-        // Извлекаем ВСЕ вопросы на текущей странице
+    // ================= ФАЗА 1: СБОР ВСЕХ ВОПРОСОВ =================
+    console.log("🔍 ФАЗА 1: Собираю все вопросы со всех страниц теста...");
+    const allQuestions = [];
+    
+    let scraping = true;
+    while (scraping) {
+        const currentUrl = testPage.target().url();
+        if (currentUrl.includes("summary.php")) {
+            console.log("Дошли до конца теста при сборе.");
+            break;
+        }
+
         const questionsOnPage = await testPage.evaluate(() => {
             const qBlocks = document.querySelectorAll('.que');
             const data = [];
-            
-            qBlocks.forEach((block, qIndex) => {
+            qBlocks.forEach((block) => {
                 const qtextElement = block.querySelector('.qtext');
                 if (!qtextElement) return;
                 
@@ -117,33 +125,49 @@ const ai = new GoogleGenAI({ apiKey: API_KEY });
                     options.push({ id, text });
                 });
 
-                data.push({ qIndex, question, options });
+                data.push({ question, options });
             });
             return data;
         });
 
-        if (!questionsOnPage || questionsOnPage.length === 0) {
-            console.log("❓ Вопросы не найдены на текущей странице. Возможно, это конец теста.");
-            break;
+        if (questionsOnPage && questionsOnPage.length > 0) {
+            questionsOnPage.forEach(q => allQuestions.push({ url: currentUrl, ...q }));
+            console.log(`Собрано ${questionsOnPage.length} вопросов с текущей страницы. Всего: ${allQuestions.length}`);
         }
 
-        console.log(`\n📋 Найдено вопросов на странице: ${questionsOnPage.length}`);
+        const nextBtn = await testPage.$('input[name="next"]');
+        if (nextBtn) {
+            await Promise.all([
+                testPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
+                nextBtn.click()
+            ]);
+            await new Promise(r => setTimeout(r, 500));
+        } else {
+            scraping = false;
+        }
+    }
 
-        // Разбиваем вопросы на пачки по 30 штук, чтобы не перегружать API
-        const chunkSize = 30;
-        for (let i = 0; i < questionsOnPage.length; i += chunkSize) {
-            const chunk = questionsOnPage.slice(i, i + chunkSize);
-            console.log(`\n⚙️ Обработка вопросов с ${i + 1} по ${i + chunk.length}...`);
+    if (allQuestions.length === 0) {
+        console.log("❌ Вопросы не найдены. Остановка.");
+        process.exit(1);
+    }
 
-            // Формируем JSON-запрос для Gemini
-            const promptData = chunk.map((q, idx) => {
-                return `Вопрос ${idx}:\n${q.question}\nВарианты:\n` + 
-                       q.options.map((o, oIdx) => `${oIdx}. ${o.text}`).join('\n');
-            }).join('\n\n---\n\n');
+    // ================= ФАЗА 2: ЗАПРОСЫ К GEMINI =================
+    console.log(`\n🧠 ФАЗА 2: Отправка ${allQuestions.length} вопросов в Gemini (пачками до 30 штук)...`);
+    const allIdsToClick = []; // Соберем все ID инпутов, которые нужно прокликать
 
-            const prompt = `Ты эксперт по тестированию и IT. Реши следующие тестовые вопросы.
-Вот список вопросов и вариантов ответов:
+    const chunkSize = 30;
+    for (let i = 0; i < allQuestions.length; i += chunkSize) {
+        const chunk = allQuestions.slice(i, i + chunkSize);
+        console.log(`Отправка пачки с ${i + 1} по ${i + chunk.length}...`);
 
+        const promptData = chunk.map((q, idx) => {
+            return `Вопрос ${idx}:\n${q.question}\nВарианты:\n` + 
+                   q.options.map((o, oIdx) => `${oIdx}. ${o.text}`).join('\n');
+        }).join('\n\n---\n\n');
+
+        const prompt = `Ты эксперт по тестированию и IT. Реши следующие тестовые вопросы.
+Вот список вопросов:
 ${promptData}
 
 Верни результат СТРОГО в формате JSON-массива, где каждый элемент имеет вид:
@@ -153,63 +177,68 @@ ${promptData}
 }
 Никакого лишнего текста, только валидный JSON.`;
 
-            try {
-                console.log("🧠 Отправляю запрос к Gemini API...");
-                const response = await ai.models.generateContent({
-                    model: 'gemini-2.5-flash',
-                    contents: prompt,
-                });
-                
-                let rawAns = response.text.trim();
-                // Убираем маркдаун для json если он есть
-                if (rawAns.startsWith('```json')) rawAns = rawAns.replace(/```json/g, '').replace(/```/g, '').trim();
-                if (rawAns.startsWith('```')) rawAns = rawAns.replace(/```/g, '').trim();
+        try {
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: prompt,
+            });
+            
+            let rawAns = response.text.trim();
+            if (rawAns.startsWith('```json')) rawAns = rawAns.replace(/```json/g, '').replace(/```/g, '').trim();
+            if (rawAns.startsWith('```')) rawAns = rawAns.replace(/```/g, '').trim();
 
-                const parsedAnswers = JSON.parse(rawAns);
-                console.log(`🤖 Ответ получен и успешно разобран.`);
-
-                // Кликаем по ответам для текущего чанка
-                const idsToClick = [];
-                parsedAnswers.forEach(ans => {
-                    const localQIndex = ans.q;
-                    const selectedOptions = ans.a;
-                    if (chunk[localQIndex]) {
-                        selectedOptions.forEach(optIdx => {
-                            const optId = chunk[localQIndex].options[optIdx]?.id;
-                            if (optId) idsToClick.push(optId);
-                        });
-                    }
-                });
-
-                if (idsToClick.length > 0) {
-                    await testPage.evaluate((ids) => {
-                        ids.forEach(id => {
-                            const el = document.getElementById(id);
-                            if (el && !el.checked) el.click();
-                        });
-                    }, idsToClick);
-                    console.log(`✅ Выбраны варианты для ${chunk.length} вопросов.`);
+            const parsedAnswers = JSON.parse(rawAns);
+            
+            parsedAnswers.forEach(ans => {
+                const localQIndex = ans.q;
+                const selectedOptions = ans.a;
+                if (chunk[localQIndex]) {
+                    selectedOptions.forEach(optIdx => {
+                        const optId = chunk[localQIndex].options[optIdx]?.id;
+                        if (optId) allIdsToClick.push(optId);
+                    });
                 }
-            } catch (e) {
-                console.error("❌ Ошибка при запросе/парсинге Gemini:", e.message);
-                console.log("Ответ от API был:", response ? response.text : "пусто");
-            }
+            });
+            console.log(`✅ Пачка успешно обработана.`);
+        } catch (e) {
+            console.error("❌ Ошибка при запросе/парсинге Gemini:", e.message);
+        }
+    }
+
+    // ================= ФАЗА 3: ПРОКЛИКИВАНИЕ ОТВЕТОВ =================
+    console.log(`\n🖱️ ФАЗА 3: Возвращаемся в начало и проставляем ответы...`);
+    
+    // Идем на первую страницу с вопросами
+    await testPage.goto(allQuestions[0].url, { waitUntil: 'domcontentloaded' });
+    
+    let applying = true;
+    while (applying) {
+        if (testPage.target().url().includes("summary.php")) {
+            break;
         }
 
-        // Жмем "Следующая страница"
+        // Кликаем нужные ID на этой странице
+        await testPage.evaluate((ids) => {
+            ids.forEach(id => {
+                const el = document.getElementById(id);
+                if (el && !el.checked) el.click();
+            });
+        }, allIdsToClick);
+
+        // Небольшая пауза для срабатывания AJAX (сохранения ответа)
+        await new Promise(r => setTimeout(r, 600));
+
         const nextBtn = await testPage.$('input[name="next"]');
         if (nextBtn) {
-            console.log("➡️ Переход на следующую страницу...");
             await Promise.all([
                 testPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
                 nextBtn.click()
             ]);
-            await new Promise(r => setTimeout(r, 1000));
+            await new Promise(r => setTimeout(r, 500));
         } else {
-            console.log("🏁 Кнопка 'Далее' не найдена. Тест завершен!");
-            hasNext = false;
+            applying = false;
         }
     }
 
-    console.log("🎉 Прохождение закончено!");
+    console.log("🎉 Прохождение закончено! Проверьте страницу сводки.");
 })();
