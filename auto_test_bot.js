@@ -39,86 +39,125 @@ const ai = new GoogleGenAI({ apiKey: API_KEY });
             try {
                 const url = p.url();
                 if (url.includes("attempt.php") || url.includes("quiz")) {
-                    // Убеждаемся, что на странице реально есть вопросы
-                    const hasQuestion = await p.evaluate(() => !!document.querySelector('.qtext'));
+                    const hasQuestion = await p.evaluate(() => !!document.querySelector('.que'));
                     if (hasQuestion) {
                         testPage = p;
                         break;
                     }
                 }
-            } catch (e) {
-                // Игнорируем ошибки доступа к закрытым вкладкам
-            }
+            } catch (e) {}
         }
         if (!testPage) {
-            await new Promise(r => setTimeout(r, 2000)); // Ждем 2 секунды перед следующей проверкой
+            await new Promise(r => setTimeout(r, 2000));
         }
     }
 
-    // Если тест открылся во всплывающем окне, фокус страницы мог потеряться
     await testPage.bringToFront();
     console.log("✅ Тест обнаружен! Начинаю автоматическое прохождение.");
 
     let hasNext = true;
     while (hasNext) {
-        const qData = await testPage.evaluate(() => {
-            const qtextElement = document.querySelector('.qtext');
-            if (!qtextElement) return null;
+        // Извлекаем ВСЕ вопросы на текущей странице
+        const questionsOnPage = await testPage.evaluate(() => {
+            const qBlocks = document.querySelectorAll('.que');
+            const data = [];
             
-            const question = qtextElement.innerText.trim();
-            const answerElements = document.querySelectorAll('.answer input[type="radio"], .answer input[type="checkbox"]');
-            
-            const options = [];
-            answerElements.forEach(el => {
-                if (el.value === "-1") return;
-                const id = el.id;
-                const labelDiv = document.getElementById(id + '_label') || el.closest('div').querySelector('label') || el.parentElement;
-                const text = labelDiv ? labelDiv.innerText.trim() : '';
-                options.push({ id, text });
-            });
+            qBlocks.forEach((block, qIndex) => {
+                const qtextElement = block.querySelector('.qtext');
+                if (!qtextElement) return;
+                
+                const question = qtextElement.innerText.trim();
+                const answerElements = block.querySelectorAll('.answer input[type="radio"], .answer input[type="checkbox"]');
+                
+                const options = [];
+                answerElements.forEach(el => {
+                    if (el.value === "-1") return;
+                    const id = el.id;
+                    const labelDiv = document.getElementById(id + '_label') || el.closest('div').querySelector('label') || el.parentElement;
+                    const text = labelDiv ? labelDiv.innerText.trim() : '';
+                    options.push({ id, text });
+                });
 
-            return { question, options };
+                data.push({ qIndex, question, options });
+            });
+            return data;
         });
 
-        if (!qData || !qData.question) {
-            console.log("❓ Вопрос не найден на текущей странице. Возможно, это конец теста.");
+        if (!questionsOnPage || questionsOnPage.length === 0) {
+            console.log("❓ Вопросы не найдены на текущей странице. Возможно, это конец теста.");
             break;
         }
 
-        console.log(`\n📝 Вопрос: ${qData.question}`);
-        
-        const prompt = `Ты сдаешь тест. Вот вопрос:\n\n${qData.question}\n\nВот варианты ответов:\n` + 
-                       qData.options.map((o, idx) => `${idx + 1}. ${o.text}`).join('\n') + 
-                       `\n\nВыбери правильный(ые) ответ(ы). Верни ТОЛЬКО номера правильных ответов (например, "1" или "2, 4"). Без лишнего текста.`;
+        console.log(`\n📋 Найдено вопросов на странице: ${questionsOnPage.length}`);
 
-        try {
-            console.log("🧠 Спрашиваю Gemini API...");
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: prompt,
-            });
-            
-            const rawAns = response.text.trim();
-            console.log(`🤖 Ответ Gemini: ${rawAns}`);
+        // Разбиваем вопросы на пачки по 30 штук, чтобы не перегружать API
+        const chunkSize = 30;
+        for (let i = 0; i < questionsOnPage.length; i += chunkSize) {
+            const chunk = questionsOnPage.slice(i, i + chunkSize);
+            console.log(`\n⚙️ Обработка вопросов с ${i + 1} по ${i + chunk.length}...`);
 
-            const selectedIndexes = rawAns.match(/\d+/g)?.map(n => parseInt(n) - 1) || [];
-            const idsToClick = selectedIndexes.map(idx => qData.options[idx]?.id).filter(Boolean);
-            
-            if (idsToClick.length > 0) {
-                await testPage.evaluate((ids) => {
-                    ids.forEach(id => {
-                        const el = document.getElementById(id);
-                        if (el && !el.checked) el.click();
-                    });
-                }, idsToClick);
-                console.log(`✅ Выбраны варианты: ${selectedIndexes.map(i => i+1).join(', ')}`);
-            } else {
-                console.log("⚠️ Не удалось разобрать ответ от Gemini.");
+            // Формируем JSON-запрос для Gemini
+            const promptData = chunk.map((q, idx) => {
+                return `Вопрос ${idx}:\n${q.question}\nВарианты:\n` + 
+                       q.options.map((o, oIdx) => `${oIdx}. ${o.text}`).join('\n');
+            }).join('\n\n---\n\n');
+
+            const prompt = `Ты эксперт по тестированию и IT. Реши следующие тестовые вопросы.
+Вот список вопросов и вариантов ответов:
+
+${promptData}
+
+Верни результат СТРОГО в формате JSON-массива, где каждый элемент имеет вид:
+{
+  "q": номер_вопроса_начиная_с_0,
+  "a": [массив_индексов_правильных_вариантов_начиная_с_0]
+}
+Никакого лишнего текста, только валидный JSON.`;
+
+            try {
+                console.log("🧠 Отправляю запрос к Gemini API...");
+                const response = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash',
+                    contents: prompt,
+                });
+                
+                let rawAns = response.text.trim();
+                // Убираем маркдаун для json если он есть
+                if (rawAns.startsWith('```json')) rawAns = rawAns.replace(/```json/g, '').replace(/```/g, '').trim();
+                if (rawAns.startsWith('```')) rawAns = rawAns.replace(/```/g, '').trim();
+
+                const parsedAnswers = JSON.parse(rawAns);
+                console.log(`🤖 Ответ получен и успешно разобран.`);
+
+                // Кликаем по ответам для текущего чанка
+                const idsToClick = [];
+                parsedAnswers.forEach(ans => {
+                    const localQIndex = ans.q;
+                    const selectedOptions = ans.a;
+                    if (chunk[localQIndex]) {
+                        selectedOptions.forEach(optIdx => {
+                            const optId = chunk[localQIndex].options[optIdx]?.id;
+                            if (optId) idsToClick.push(optId);
+                        });
+                    }
+                });
+
+                if (idsToClick.length > 0) {
+                    await testPage.evaluate((ids) => {
+                        ids.forEach(id => {
+                            const el = document.getElementById(id);
+                            if (el && !el.checked) el.click();
+                        });
+                    }, idsToClick);
+                    console.log(`✅ Выбраны варианты для ${chunk.length} вопросов.`);
+                }
+            } catch (e) {
+                console.error("❌ Ошибка при запросе/парсинге Gemini:", e.message);
+                console.log("Ответ от API был:", response ? response.text : "пусто");
             }
-        } catch (e) {
-            console.error("❌ Ошибка при запросе к Gemini:", e.message);
         }
 
+        // Жмем "Следующая страница"
         const nextBtn = await testPage.$('input[name="next"]');
         if (nextBtn) {
             console.log("➡️ Переход на следующую страницу...");
