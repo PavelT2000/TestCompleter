@@ -199,7 +199,7 @@ ${promptData}
             'gemini-3.7-flash',
             'gemini-3.6-flash',
             'gemini-3.5-flash',
-            'gemini-3-flash',
+            'gemini-3-flash-preview',
             'gemini-3.5-flash-lite',
             'gemini-3.1-flash-lite',
             'gemini-2.5-flash-lite',
@@ -208,22 +208,24 @@ ${promptData}
 
         for (const model of fallbackModels) {
             try {
-                console.log(`🧠 Отправляю запрос к Gemini API (модель: ${model})...`);
+                console.log(`🧠 Стучусь в Gemini API (модель: ${model})...`);
                 const response = await ai.models.generateContent({
                     model: model,
                     contents: prompt,
                 });
                 rawAns = response.text.trim();
-                console.log(`✅ Модель ${model} успешно ответила.`);
+                console.log(`✅ Модель ${model} успешно приняла и обработала запрос!`);
                 break; // Выходим из цикла при успехе
             } catch (e) {
                 let errMsg = e.message;
-                if (errMsg.includes("Quota exceeded") || errMsg.includes("429")) {
-                    console.log(`⚠️ Лимит запросов у ${model} исчерпан. Пробуем резервную...`);
+                if (errMsg.includes("503") || errMsg.includes("high demand")) {
+                    console.log(`🔀 Модель ${model} перегружена запросами (ошибка серверов Google). Ищу свободную...`);
+                } else if (errMsg.includes("Quota") || errMsg.includes("429")) {
+                    console.log(`🔀 Лимит у ${model} исчерпан. Ищу свободную...`);
                 } else {
-                    console.log(`⚠️ Ошибка у ${model}: ${errMsg.substring(0, 100)}... Пробуем резервную...`);
+                    console.log(`🔀 Модель ${model} недоступна. Ищу свободную...`);
                 }
-                await new Promise(r => setTimeout(r, 2000)); // Пауза перед сменой модели
+                await new Promise(r => setTimeout(r, 1000));
             }
         }
 
